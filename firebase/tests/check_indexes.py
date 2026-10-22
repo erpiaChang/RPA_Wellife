@@ -15,6 +15,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 common = open(os.path.join(ROOT, "web", "rpa-common.js"), encoding="utf-8").read()
 block = re.search(r"export const MODULES = \[(.*?)\];", common, re.S).group(1)
 need = {"used." + k.lower() for k in re.findall(r'\["(\w+)",', block) if k != "Login"} | {"used.sites"}
+# 웰라이프 업체는 WELLIFE_MODULES 를 wellife_ 키로 묻는다 (rpa.js usageKeys - 로그인·운송장번호 전송 말고, 사용자 2026-10-21)
+wl_block = re.search(r"export const WELLIFE_MODULES = \[(.*?)\];", common, re.S).group(1)
+need |= {"used." + (k.lower() if k == "InvoiceSend" else f"wellife_{k.lower()}") for k in re.findall(r'\["(\w+)",', wl_block) if k != "Login"}
 idx = json.load(open(os.path.join(ROOT, "rules", "firestore.indexes.json"), encoding="utf-8"))
 have = {f["fieldPath"] for i in idx["indexes"] if [x["fieldPath"] for x in i["fields"]][:1] == ["started_at"] for f in i["fields"][1:]}
 missing = sorted(need - have)

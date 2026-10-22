@@ -321,6 +321,12 @@ STEP_WAIT, STEP_TRIES = 20.0, 6  # 못 찾으면 20초씩 6번(최대 2분) 다�
 RECORD_VERSION = rpa_status.RECORD_VERSION   # 기록 모양 - rpa_status 에 있다 (에이전트도 본다)
 DOWNLOAD_TIMEOUT_MS = 300000  # 파일이 오기 시작할 때까지 기다리는 시간 (안 오면 그 단계 실패). 쇼핑몰이 엑셀을 만드는 데 오래 걸려 60초 → 5분,
                               # 기다리는 동안 로그를 남긴다 (2026-10-15 메모 5). 오기 시작한 뒤에는 다 받을 때까지 기다린다 (느려도)
+# 받기 단추를 누른 뒤 몰이 '자료 없음' 알림창을 띄우면 5분을 다 기다리지 않고 그 단계를 '주문 없음' 으로 끝낸다 (사용자 2026-10-21).
+# 몰마다의 문구는 아직 확인한 것이 없어 좁게 잡는다: 자료를 뜻하는 낱말 뒤 가까이에 '없'·'존재하지 않' 이 있고 오류를 뜻하는 낱말은 없을 때만.
+# 맞지 않는 알림창('엑셀을 만드는 중' 등)이면 예전처럼 끝까지 기다린다. 알림창 뒤에 늦게 오는 파일은 NO_DATA_GRACE 초까지 받는다.
+NO_DATA_RE = re.compile(r"(데이터|자료|내역|주문|결과|목록|대상|(?<![가-힣])건)[^.?!]{0,12}(없|존재하지 ?않)")     # '조건' 의 건은 아니다
+NO_DATA_NOT = re.compile(r"선택|권한|로그인|세션|비밀번호|아이디|인증|오류|에러|실패|만료|동의")
+NO_DATA_GRACE = 10.0
 OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"     # 옛 엑셀(xls)·암호 건 엑셀
 CUT = 20                     # 대시보드로 가는 설명에서 누른 것의 글자 길이
 SETTLE_MAX_MS = 3000        # 단계 사이 기다림 상한 (사람이 기다린 시간의 절반). 시험에서 0 으로도 돌려 본다
@@ -875,6 +881,15 @@ class NotFound(Exception):
     pass
 
 
+class NoOrders(Exception):
+    """받기 단추 뒤 몰이 '자료 없음' 알림창을 띄웠다 (그 글) - 실패가 아니라 받을 파일이 없다 (메일 고르기의 '대상 없음' 과 같다)."""
+
+
+def no_data(message):
+    """알림창 글이 '자료 없음' 인가 (NO_DATA_RE) - 오류를 뜻하는 낱말이 함께 있으면 아니다."""
+    return bool(NO_DATA_RE.search(message or "")) and not NO_DATA_NOT.search(message or "")
+
+
 class Skip(Exception):
     pass
 
@@ -981,6 +996,7 @@ class Replayer:
         self.dialogs = []           # 재생 중 뜬 알림창 글 (사이트가 인증번호를 거절했나 본다)
         # 메일 고르기: mail_memory = MailMemory (ACTOR - 처리한 메일을 건너뛰고 기억), pick_preview = 기억과 상관없이 1통 (옵저버 미리보기)
         self.mail_memory, self.pick_preview, self.no_target = None, False, False
+        self.no_target_why = "대상 없음"     # no_target 일 때 단계 글 (몰의 '자료 없음' 알림창이면 그 글)
         # 인증 차례 (병렬 수집): (threading.Lock, 첫 단계, 끝 단계) - 첫 단계 앞에서 잡고 끝 단계를 지나면 놓는다 (auth_start·auth_end). 없으면 안 기다린다
         self.gate, self.gate_held = None, False
 
@@ -1058,14 +1074,22 @@ class Replayer:
 
     def _until_download(self, page, act):
         """act() 를 하고 파일이 올 때까지 기다린다 - 누른 창이든 그 단추가 연 새 창이든 (2026-10-02: 팝업이 내려 주는 파일을
-        누른 창에서만 기다려 못 받았다). 안 오면 download_timeout_ms 뒤 그 단계 실패."""
+        누른 창에서만 기다려 못 받았다). 안 오면 download_timeout_ms 뒤 그 단계 실패.
+        누른 뒤 '자료 없음' 알림창이 떴으면 NO_DATA_GRACE 초까지만 기다리고 NoOrders (사용자 2026-10-21)."""
         self.downloads = []
         start = time.time()             # 누르기 전부터 - 누르기가 느린 페이지를 기다린 시간도 센다
+        mark = len(self.dialogs)        # 누른 뒤에 뜬 알림창만 본다
         act()
         end, note = start + self.download_timeout_ms / 1000, start + self.step_timeout
+        said = said_at = None
         while not self.downloads:
             self._check_cancel()
             now = time.time()
+            if said is None:
+                said = next((m for m in self.dialogs[mark:] if no_data(m)), None)
+                said_at = now
+            elif now > said_at + NO_DATA_GRACE:
+                raise NoOrders(said)
             if now > end:
                 raise NotFound(f"{self.download_timeout_ms / 1000:.0f}초 동안 파일 다운로드가 시작되지 않았습니다.")
             if now > note:              # 쇼핑몰이 엑셀을 만드는 중일 수 있다 - 멈춘 줄 알지 않게 (2026-10-15)
@@ -1490,6 +1514,8 @@ class Replayer:
                     how = self._step(j, dict(steps[j], loose=True))
                 except Skip as e:
                     how = f"건너뜀 ({e})"
+                except NoOrders as e:   # 그 메일에서 받을 것이 없다 - 이 메일만 넘기고 다음 메일로 (사용자 2026-10-21)
+                    how = f"주문 없음 (알림창: {_cut(' '.join(str(e).split()), self.hide_values)})"
                 self.log(f"  {j + 1:2d}/{len(steps)} {describe(steps[j], self.hide_values)}  [{how}]")
             if mem is not None:
                 mem.add_all([rid])   # 받기까지 다 한 메일만 - 실패한 메일은 다음 실행에서 다시
@@ -1554,6 +1580,15 @@ class Replayer:
             except Skip as e:
                 self.results.append((i, "skip", str(e)))
                 self.log(f"  {i:2d}/{len(steps)} {text}  - 건너뜀 ({e})")
+            except NoOrders as e:       # 받을 주문이 없다 - 실패로 끊지 않고 다음 단계로 (뒤에 다른 받기 단계가 있을 수 있다)
+                said = str(e)
+                for v in (self.creds or {}).values():      # 몰이 알림창에 아이디를 되풀이할 수 있다
+                    if v:
+                        said = said.replace(str(v), "***")
+                self.no_target = True
+                self.no_target_why = f"주문 없음 (알림창: {_cut(' '.join(said.split()), self.hide_values)})"   # 대시보드로 가는 알림창 글은 다른 로그처럼 자른다
+                self.results.append((i, "ok", self.no_target_why))
+                self.log(f"  {i:2d}/{len(steps)} {text}  [{self.no_target_why}]")
             except Exception as e:
                 why = f"{type(e).__name__}: {str(e).splitlines()[0]}"
                 if self.hide_values:

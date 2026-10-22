@@ -8,7 +8,7 @@ import {
 import { HEARTBEAT_EVERY_DEFAULT, HEARTBEAT_MISS } from "./firebase-config.js";
 import { toast } from "./toast.js";
 import { icon as lucide } from "./icons.js";
-import { P, esc, MODULES, hhmm, when, isoDay, sendCommand, slotNames, openWindow, repeatOf } from "./rpa-common.js";
+import { P, esc, MODULES, WELLIFE_MODULES, wellifeOn, hhmm, when, isoDay, sendCommand, slotNames, openWindow, repeatOf } from "./rpa-common.js";
 export * as settings from "./rpa-settings.js";   // 관리 > 환경설정 이 이 앱의 설정 화면을 붙인다 (settings.js)
 
 export const key = "rpa";
@@ -653,7 +653,13 @@ function paintRepeat() {
 
 // --- 이번 달 사용량 (토큰 3부, 관리자만 - 오른쪽 열): 이달 1일과 통장 시작 중 늦은 때부터, 업체 전체(PC 모두)를 서버가 더한다.
 // 남은 토큰이 바뀔 때(실행이 끝났거나 충전됐다)만 다시 읽는다. 로그인은 0개라 안 보인다. 새 모듈은 여기와 색인(firestore.indexes.json)에 더한다
-const USAGE_KEYS = [...MODULES.filter(([k]) => k !== "Login").map(([k, l]) => [k.toLowerCase(), l]), ["sites", "쇼핑몰·사이트 받기"]];
+// 웰라이프 업체는 웰라이프 모듈 키로 센다 - 에이전트 history_key 와 같은 규칙: 로그인·모든 업체용(운송장번호 전송) 말고 'wellife_' 를 붙인다.
+// 전엔 MODULES 키만 물어 웰라이프 모듈 줄이 늘 0 으로 숨었다 (합계만 맞았다, 사용자 2026-10-21)
+const usageKeys = () => {
+  const wl = wellifeOn(c.me.cid, c.policy);
+  return [...(wl ? WELLIFE_MODULES : MODULES).filter(([k]) => k !== "Login")
+    .map(([k, l]) => [wl && k !== "InvoiceSend" ? `wellife_${k.toLowerCase()}` : k.toLowerCase(), l]), ["sites", "쇼핑몰·사이트 받기"]];
+};
 let usageFor = null, usageSeq = 0, usageRetryAt = 0;
 const USAGE_RETRY_MS = 5 * 60 * 1000;          // 못 읽으면 5분 뒤에 - 현황(1초)마다 다시 읽으면 하루 읽기 한도를 다 쓴다 (2026-10-14 색인 빠진 칸)
 async function paintUsage() {
@@ -673,12 +679,12 @@ async function paintUsage() {
     // 한 질의에 여러 칸을 같이 더하면 그 칸이 모두 있는 기록만 센다 (Firestore) - 칸마다 따로 (각각 읽기 1번 꼴)
     const one = (at, field) => getAggregateFromServer(query(collection(fs, "runs", c.me.cid, "items"), where("started_at", ">=", at)),
       { s: sum(field) }).then((r) => r.data().s ?? 0);
-    const keys = USAGE_KEYS.map(([k]) => k);
+    const uk = usageKeys(), keys = uk.map(([k]) => k);
     const [total, todayTotal, ...counts] = await Promise.all([
       one(from, "cost"), one(from > today ? from : today, "cost"), ...keys.map((k) => one(from, `used.${k}`).catch(() => 0))]);   // 한 칸이 안 돼도 나머지는 보인다
     if (seq !== usageSeq) return;
     const got = Object.fromEntries(keys.map((k, i) => [k, counts[i]]));
-    $("usage-list").replaceChildren(...USAGE_KEYS.filter(([k]) => got[k] > 0).map(([k, label]) => {
+    $("usage-list").replaceChildren(...uk.filter(([k]) => got[k] > 0).map(([k, label]) => {
       const row = document.createElement("div"); row.className = "u-row";
       const name = document.createElement("span"); name.textContent = label;
       const n = document.createElement("span"); n.className = "num"; n.textContent = `${got[k]}회`;
